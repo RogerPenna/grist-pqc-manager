@@ -1,0 +1,9 @@
+venv/
+.env
+__pycache__/
+*.pyc
+.streamlit/
+*.ps1
+debug_*.py
+app_pqc.csv
+acessos_grist_*.csv
