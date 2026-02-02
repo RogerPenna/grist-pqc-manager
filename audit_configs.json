@@ -1,0 +1,11 @@
+{
+  "🎖️PQC RS 25-26 (Serra )": {
+    "doc_id": "4XcNgTrmQK6MjcVAk8HNfh",
+    "table_id": "Empresa",
+    "title_col": "Nome_da_Empresa",
+    "email_cols": [
+      "Email",
+      "Avaliador_Email"
+    ]
+  }
+}
