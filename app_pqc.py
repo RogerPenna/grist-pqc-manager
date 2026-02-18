@@ -128,6 +128,35 @@ def add_table_record(base_url, doc_id, table_id, col_id, value):
     except Exception as e:
         return False, str(e)
 
+def create_table(base_url, doc_id, table_id, columns_payload):
+    """Creates a new table in the document with the provided columns."""
+    try:
+        url = f"{base_url}/docs/{doc_id}/tables"
+        # Grist requires columns to be present when creating a table
+        payload = {"tables": [{"id": table_id, "columns": columns_payload}]}
+        response = requests.post(url, headers=HEADERS, json=payload)
+        if response.status_code == 200:
+            return True, "Tabela e colunas criadas com sucesso!"
+        # If table already exists, return a specific status
+        if "already exists" in response.text.lower():
+            return False, "EXISTING"
+        return False, f"Erro {response.status_code}: {response.text}"
+    except Exception as e:
+        return False, str(e)
+
+def add_columns(base_url, doc_id, table_id, columns_payload):
+    """Adds columns to an existing table."""
+    try:
+        url = f"{base_url}/docs/{doc_id}/tables/{table_id}/columns"
+        # columns_payload should be a list of {id, fields: {label, type, formula, isFormula, ...}}
+        payload = {"columns": columns_payload}
+        response = requests.post(url, headers=HEADERS, json=payload)
+        if response.status_code == 200:
+            return True, "Colunas adicionadas com sucesso!"
+        return False, f"Erro {response.status_code}: {response.text}"
+    except Exception as e:
+        return False, str(e)
+
 def load_audit_configs():
     """Loads saved audit configurations from JSON."""
     if os.path.exists("audit_configs.json"):
@@ -274,7 +303,7 @@ if st.sidebar.button("🔄 Forçar Recarga Geral", key="force_reload_btn"):
     st.rerun()
 
 # Main Content Tabs
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["👥 Visão Global (Org)", "🗺️ Mapeamento de Documentos", "⚡ Ações Rápidas", "🛡️ Auditoria de Regras", "❓ Ajuda", "⚖️ Auditoria de Integridade"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["👥 Visão Global (Org)", "🗺️ Mapeamento de Documentos", "⚡ Ações Rápidas", "🛡️ Auditoria de Regras", "❓ Ajuda", "⚖️ Auditoria de Integridade", "🏗️ Clonador de Templates"])
 
 # --- TAB 1: Global Organization Users ---
 with tab1:
@@ -422,6 +451,17 @@ with tab2:
         if f_em: df_f = df_f[df_f['Email'].str.contains(f_em, case=False, na=False, regex=False)]
         if f_nm: df_f = df_f[df_f['Nome'].str.contains(f_nm, case=False, na=False, regex=False)]
         if f_ac: df_f = df_f[df_f['Nível de Acesso'].str.contains(f_ac, case=False, na=False, regex=False)]
+
+        # --- CONTADOR E SELEÇÃO EM MASSA ---
+        st.info(f"📊 Mostrando **{len(df_f)}** de **{len(df)}** registros totais.")
+        
+        col_sel1, col_sel2, _ = st.columns([1, 1, 2])
+        if col_sel1.button("✅ Selecionar Todos Filtrados"):
+            st.session_state.mapped_data.loc[df_f.index, 'Selecionar'] = True
+            st.rerun()
+        if col_sel2.button("❌ Desmarcar Todos"):
+            st.session_state.mapped_data['Selecionar'] = False
+            st.rerun()
 
         def style_acc(v):
             v = str(v).lower()
@@ -814,18 +854,13 @@ with tab5:
     - **🟢 Adicionar**: Insira um email e escolha o nível (Viewer, Editor, Owner) para conceder acesso imediato.
     - **🔴 Remover**: Digite o email para revogar o acesso imediatamente.
 
-    ### 🛡️ 4. Auditoria de Regras (Access Rules)
-    Ferramenta avançada para gerenciar as Regras de Acesso (ACL) do Grist (`_grist_ACLRules`).
-    
-    #### Sub-aba: 👁️ Visualizar
-    - **Carregar Regras**: Lê as regras atuais do documento selecionado.
-    - **Tabela**: Exibe as regras de forma humanizada (Recurso, Condição, Permissões).
-    - **Exportar JSON**: Gera um arquivo JSON pronto para backup ou para ser analisado por uma IA (como o ChatGPT/Gemini) para sugerir melhorias.
-
-    #### Sub-aba: ✍️ Editar Regras
-    - **Editor JSON**: Cole aqui o JSON com as novas regras.
-    - **Backup Automático**: Antes de aplicar qualquer mudança, o sistema salva as regras antigas na pasta `backups/` localmente.
-    - **Enviar Regras**: Substitui **todas** as regras do documento pelas novas fornecidas. Use com cautela!
+    ### 🏗️ 7. Clonador de Templates
+    Esta ferramenta permite copiar a estrutura (esquema) de uma tabela de um documento para outros.
+    - **Origem**: Escolha o documento e a tabela que servem de modelo (ex: `Checklistdiamante`).
+    - **Destinos**: Selecione um ou mais documentos onde você deseja que essa tabela seja criada.
+    - **O que é copiado**: IDs das colunas, Nomes (Labels), Tipos de dados (Text, Numeric, Ref, etc), Fórmulas e Opções de Widget.
+    - **O que NÃO é copiado**: Os dados (registros) da tabela.
+    - **Nota**: Útil para padronizar documentos novos com as mesmas tabelas de suporte.
 
     ---
 
@@ -1269,6 +1304,93 @@ with tab6:
                                             time.sleep(1); st.rerun()
                                     else:
                                         st.info("Nenhum usuário órfão na seleção.")
+
+# --- TAB 7: Template Cloner ---
+with tab7:
+    st.header("🏗️ Clonador de Templates (Estrutura de Tabelas)")
+    st.markdown("Copie a estrutura (colunas e fórmulas) de uma tabela para outros documentos, sem copiar os dados.")
+
+    if st.session_state.mapped_data is not None:
+        all_docs_list = st.session_state.mapped_data[['Documento', 'Doc ID']].drop_duplicates()
+        doc_opts_clone = {r['Documento']: r['Doc ID'] for _, r in all_docs_list.iterrows()}
+    else:
+        wss = get_workspaces_and_docs(CURRENT_BASE_URL, selected_org_id)
+        doc_opts_clone = {}
+        for ws in wss:
+            for d in ws.get('docs', []):
+                doc_opts_clone[d['name']] = d['id']
+    
+    st.subheader("1. Selecione a Origem")
+    col_src1, col_src2 = st.columns(2)
+    src_doc_name = col_src1.selectbox("Documento de Origem", sorted(doc_opts_clone.keys()), index=None, key="clone_src_doc")
+    
+    if src_doc_name:
+        src_doc_id = doc_opts_clone[src_doc_name]
+        src_tables = get_tables(CURRENT_BASE_URL, src_doc_id)
+        src_table_ids = sorted([t['id'] for t in src_tables])
+        src_table_id = col_src2.selectbox("Tabela de Origem", src_table_ids, index=None, key="clone_src_table")
+        
+        if src_table_id:
+            # Fetch Schema
+            with st.status("Lendo estrutura da tabela...", expanded=False):
+                raw_cols = get_columns(CURRENT_BASE_URL, src_doc_id, src_table_id)
+                
+                # Filter out system columns and internal metadata
+                # Grist API returns 'id' and 'fields'
+                clean_cols = []
+                for c in raw_cols:
+                    f = c['fields']
+                    # We only need key functional fields for cloning
+                    clean_cols.append({
+                        "id": c['id'],
+                        "fields": {
+                            "label": f.get("label"),
+                            "type": f.get("type"),
+                            "isFormula": f.get("isFormula", False),
+                            "formula": f.get("formula", ""),
+                            "widgetOptions": f.get("widgetOptions", ""),
+                            "description": f.get("description", "")
+                        }
+                    })
+                st.write(f"Encontradas {len(clean_cols)} colunas.")
+                st.json(clean_cols)
+
+            st.subheader("2. Selecione os Destinos")
+            # Multiple selection for targets
+            target_doc_names = st.multiselect("Documentos de Destino", sorted(doc_opts_clone.keys()), key="clone_targets")
+            
+            if target_doc_names:
+                st.warning(f"⚠️ Isso criará a tabela '{src_table_id}' em {len(target_doc_names)} documentos. Se a tabela já existir, a criação da tabela falhará, mas tentaremos adicionar as colunas faltantes.")
+                
+                if st.button("🚀 Iniciar Clonagem em Massa", type="primary"):
+                    progress = st.progress(0)
+                    log_area = st.empty()
+                    logs = []
+                    
+                    for i, t_name in enumerate(target_doc_names):
+                        t_id = doc_opts_clone[t_name]
+                        logs.append(f"--- Processando: {t_name} ---")
+                        
+                        # 1. Try to create Table WITH columns in one go
+                        ok_t, msg_t = create_table(CURRENT_BASE_URL, t_id, src_table_id, clean_cols)
+                        
+                        if ok_t:
+                            logs.append(f"✅ {msg_t}")
+                        elif msg_t == "EXISTING":
+                            logs.append(f"ℹ️ Tabela '{src_table_id}' já existe. Verificando colunas...")
+                            # 2. Add Columns only (Grist will skip existing ones if we are lucky, 
+                            # or we can try to be safe and just log it)
+                            ok_c, msg_c = add_columns(CURRENT_BASE_URL, t_id, src_table_id, clean_cols)
+                            logs.append(f"Colunas: {msg_c}")
+                        else:
+                            logs.append(f"❌ {msg_t}")
+                        
+                        progress.progress((i + 1) / len(target_doc_names))
+                        log_area.code("\n".join(logs))
+                    
+                    st.success("Processo de clonagem concluído!")
+    else:
+        st.info("Selecione um documento de origem para começar.")
 
 
 
