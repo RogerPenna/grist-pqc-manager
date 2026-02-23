@@ -4,6 +4,7 @@ import requests
 import os
 import time
 import json
+import re
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -539,20 +540,64 @@ with tab3:
             tid = doc_opts_q[target_q]
             c1, c2 = st.columns(2)
             with c1:
-                st.subheader("🟢 Adicionar")
-                em = st.text_input("Email", key="q_add_em")
+                st.subheader("🟢 Adicionar (Massa)")
+                ems_raw = st.text_area("Email(s)", help="Cole um ou mais emails separados por vírgula, espaço ou linha.", key="q_add_ems")
                 rl = st.selectbox("Nível", ["viewers", "editors", "owners"], key="q_add_rl")
-                if st.button("Adicionar", key="q_add_btn"):
-                    s, m = update_doc_access(CURRENT_BASE_URL, tid, em, rl)
-                    st.toast(m)
-                    st.cache_data.clear(); time.sleep(1); st.rerun()
+                if st.button("Adicionar em Massa", key="q_add_btn"):
+                    # Process emails
+                    # Split by comma, space, or newline
+                    emails = [e.strip().lower() for e in re.split(r'[,\s\n]+', ems_raw) if e.strip()]
+                    
+                    if not emails:
+                        st.error("Nenhum email válido inserido.")
+                    else:
+                        success_count = 0
+                        errors = []
+                        with st.status(f"Adicionando {len(emails)} usuários...", expanded=True) as status:
+                            for em in emails:
+                                s, m = update_doc_access(CURRENT_BASE_URL, tid, em, rl)
+                                if s:
+                                    success_count += 1
+                                    st.write(f"✅ {em}: Sucesso")
+                                else:
+                                    errors.append(f"{em}: {m}")
+                                    st.write(f"❌ {em}: {m}")
+                            status.update(label="Processamento concluído!", state="complete")
+                        
+                        if success_count > 0:
+                            st.toast(f"{success_count} usuários adicionados!")
+                        if errors:
+                            st.error(f"Ocorreram {len(errors)} erros.")
+                        
+                        st.cache_data.clear(); time.sleep(1); st.rerun()
             with c2:
-                st.subheader("🔴 Remover")
-                em_r = st.text_input("Email", key="q_rm_em")
-                if st.button("Remover", key="q_rm_btn"):
-                    s, m = update_doc_access(CURRENT_BASE_URL, tid, em_r, None)
-                    st.toast(m)
-                    st.cache_data.clear(); time.sleep(1); st.rerun()
+                st.subheader("🔴 Remover (Massa)")
+                em_r_raw = st.text_area("Email(s)", help="Cole um ou mais emails para remover.", key="q_rm_ems")
+                if st.button("Remover em Massa", key="q_rm_btn", type="primary"):
+                    emails_r = [e.strip().lower() for e in re.split(r'[,\s\n]+', em_r_raw) if e.strip()]
+                    
+                    if not emails_r:
+                        st.error("Nenhum email válido inserido.")
+                    else:
+                        success_count = 0
+                        errors = []
+                        with st.status(f"Removendo {len(emails_r)} usuários...", expanded=True) as status:
+                            for em in emails_r:
+                                s, m = update_doc_access(CURRENT_BASE_URL, tid, em, None)
+                                if s:
+                                    success_count += 1
+                                    st.write(f"✅ {em}: Removido")
+                                else:
+                                    errors.append(f"{em}: {m}")
+                                    st.write(f"❌ {em}: {m}")
+                            status.update(label="Remoção concluída!", state="complete")
+                        
+                        if success_count > 0:
+                            st.toast(f"{success_count} usuários removidos!")
+                        if errors:
+                            st.error(f"Ocorreram {len(errors)} erros.")
+                            
+                        st.cache_data.clear(); time.sleep(1); st.rerun()
     else:
         st.info("Faça o mapeamento na aba anterior primeiro.")
 
