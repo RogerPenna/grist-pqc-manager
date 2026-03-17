@@ -5,6 +5,7 @@ import os
 import time
 import json
 import re
+import unicodedata
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -29,6 +30,20 @@ HEADERS = {
     "Content-Type": "application/json",
     "X-Requested-With": "XMLHttpRequest"
 }
+
+# Helper: Email Normalization
+def normalize_email(email_str):
+    if not email_str: return ""
+    # 1. Strip and Lowercase
+    email_str = email_str.strip().lower()
+    # 2. Normalize to NFKD (separates base characters from accents)
+    nks = unicodedata.normalize('NFKD', email_str)
+    # 3. Keep only base characters (removes combining marks like accents/cedillas)
+    # Also handle some manual replacements if needed, but NFKD covers most.
+    sanitized = "".join([c for c in nks if not unicodedata.combining(c)])
+    # 4. Remove any non-standard characters just in case
+    sanitized = re.sub(r'[^a-z0-9@._\-\+]', '', sanitized)
+    return sanitized
 
 # 2. API Helper Functions with Caching
 
@@ -357,6 +372,102 @@ with tab1:
                     st.warning(f"O usuário {selected_user_detail} não possui acessos diretos em documentos (apenas herdados ou nenhum).")
         else:
             st.info("💡 Para ver a lista de documentos de cada usuário aqui, vá até a aba **'🗺️ Mapeamento de Documentos'** e clique em **'Iniciar Mapeamento Completo'**.")
+
+        # --- NEW SECTION: MASS VERIFICATION ---
+        st.divider()
+        st.subheader("🔍 Verificação em Massa (Team Site)")
+        st.markdown("Cole uma lista de emails para verificar se já estão na organização e em quais documentos.")
+        
+        emails_raw = st.text_area("Emails para Verificar", placeholder="usuario1@email.com, usuario2@email.com...", help="Aceita emails separados por vírgula, espaço ou linha.", key="mass_check_input")
+        
+        if emails_raw:
+            # 1. Process and Sanitize
+            raw_list = [e.strip() for e in re.split(r'[,\s\n]+', emails_raw) if e.strip()]
+            sanitized_map = {e: normalize_email(e) for e in raw_list}
+            unique_sanitized = sorted(list(set(sanitized_map.values())))
+            
+            # 2. Build Comparison Data
+            org_emails = set(df_users['email'].str.lower().str.strip().unique()) if 'email' in df_users.columns else set()
+            
+            check_data = []
+            for sem in unique_sanitized:
+                # In Org?
+                in_org = "✅ Sim" if sem in org_emails else "❌ Não"
+                
+                # Documents?
+                docs_found = []
+                if st.session_state.mapped_data is not None:
+                    user_docs = st.session_state.mapped_data[st.session_state.mapped_data['Email'].str.lower() == sem]
+                    # Filter out inherited
+                    user_docs = user_docs[~user_docs['Nível de Acesso'].str.contains("Herdado", case=False, na=False)]
+                    docs_found = user_docs['Documento'].unique().tolist()
+                
+                check_data.append({
+                    "Selecionar": False,
+                    "Email Sanitizado": sem,
+                    "No Team Site?": in_org,
+                    "Documentos Atuais": ", ".join(docs_found) if docs_found else "—"
+                })
+            
+            df_check = pd.DataFrame(check_data)
+            # Order by "No Team Site?" (No first)
+            df_check = df_check.sort_values(by="No Team Site?", ascending=True)
+            
+            st.write(f"📋 **{len(unique_sanitized)} emails únicos processados.**")
+            
+            # 3. Display with Selection
+            edited_check = st.data_editor(
+                df_check,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Selecionar": st.column_config.CheckboxColumn("Sel", default=False),
+                    "Email Sanitizado": st.column_config.TextColumn("Email Sanitizado", width="medium"),
+                    "No Team Site?": st.column_config.TextColumn("No Team Site?", width="small"),
+                    "Documentos Atuais": st.column_config.TextColumn("Documentos Atuais", width="large"),
+                },
+                key="mass_check_editor"
+            )
+            
+            # 4. Bulk Action: Add to Document
+            sel_to_add = edited_check[edited_check["Selecionar"]]
+            
+            if not sel_to_add.empty:
+                st.info(f"👉 **{len(sel_to_add)} emails selecionados.**")
+                
+                # Choose target document
+                if st.session_state.mapped_data is not None:
+                    all_docs_list = st.session_state.mapped_data[['Documento', 'Doc ID']].drop_duplicates()
+                    doc_opts_mass = {r['Documento']: r['Doc ID'] for _, r in all_docs_list.iterrows()}
+                    
+                    c_m1, c_m2, c_m3 = st.columns([2, 1, 1])
+                    target_m = c_m1.selectbox("Selecione o Documento para incluir:", sorted(doc_opts_mass.keys()), index=None, placeholder="Buscar doc...", key="mass_add_doc_sel")
+                    lvl_m = c_m2.selectbox("Nível", ["viewers", "editors", "owners"], key="mass_add_lvl_sel")
+                    
+                    if c_m3.button("➕ Incluir em Bloco", type="primary", key="mass_add_btn"):
+                        if not target_m:
+                            st.error("Selecione um documento!")
+                        else:
+                            tid_m = doc_opts_mass[target_m]
+                            success_m = 0
+                            errors_m = []
+                            with st.status(f"Adicionando ao documento '{target_m}'...", expanded=True) as status:
+                                for _, row in sel_to_add.iterrows():
+                                    target_em = row["Email Sanitizado"]
+                                    s, m = update_doc_access(CURRENT_BASE_URL, tid_m, target_em, lvl_m)
+                                    if s:
+                                        success_m += 1
+                                        st.write(f"✅ {target_em}: OK")
+                                    else:
+                                        errors_m.append(f"{target_em}: {m}")
+                                        st.write(f"❌ {target_em}: {m}")
+                                status.update(label="Concluído!", state="complete")
+                            
+                            if success_m: st.toast(f"{success_m} usuários adicionados!")
+                            if errors_m: st.error(f"Erros: {len(errors_m)}")
+                            time.sleep(1); st.cache_data.clear(); st.rerun()
+                else:
+                    st.warning("⚠️ Mapeamento de documentos necessário para esta ação. Vá à aba 🗺️ Mapeamento.")
             
     else:
         st.info("Nenhum usuário encontrado.")
