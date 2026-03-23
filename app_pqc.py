@@ -173,6 +173,18 @@ def add_columns(base_url, doc_id, table_id, columns_payload):
     except Exception as e:
         return False, str(e)
 
+def create_document(base_url, workspace_id, doc_name):
+    """Creates a new Grist document in a specific workspace."""
+    try:
+        url = f"{base_url}/workspaces/{workspace_id}/docs"
+        payload = {"name": doc_name}
+        response = requests.post(url, headers=HEADERS, json=payload)
+        if response.status_code == 200:
+            return True, response.json() # Returns the new doc ID string
+        return False, f"Erro {response.status_code}: {response.text}"
+    except Exception as e:
+        return False, str(e)
+
 def load_audit_configs():
     """Loads saved audit configurations from JSON."""
     if os.path.exists("audit_configs.json"):
@@ -319,7 +331,9 @@ if st.sidebar.button("🔄 Forçar Recarga Geral", key="force_reload_btn"):
     st.rerun()
 
 # Main Content Tabs
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["👥 Visão Global (Org)", "🗺️ Mapeamento de Documentos", "⚡ Ações Rápidas", "🛡️ Auditoria de Regras", "❓ Ajuda", "⚖️ Auditoria de Integridade", "🏗️ Clonador de Templates"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["👥 Visão Global (Org)", "🗺️ Mapeamento de Documentos", "⚡ Ações Rápidas", "🛡️ Auditoria de Regras", "❓ Ajuda", "⚖️ Auditoria de Integridade", "🏗️ Clonador de Templates", "🛠️ Blueprint (Novo Doc)"])
+
+# ... (Previous tabs 1-7 remain unchanged) ...
 
 # --- TAB 1: Global Organization Users ---
 with tab1:
@@ -1547,6 +1561,192 @@ with tab7:
                     st.success("Processo de clonagem concluído!")
     else:
         st.info("Selecione um documento de origem para começar.")
+
+# --- TAB 8: Blueprint (Novo Doc) ---
+with tab8:
+    st.header("🛠️ Criar Estrutura (Blueprint)")
+    st.markdown("Crie novos documentos do zero e aplique uma estrutura de tabelas e colunas via JSON.")
+
+    # 1. DOCUMENT CREATION SECTION
+    st.subheader("1. Criar Novo Documento")
+    col_c1, col_c2 = st.columns([2, 1])
+    
+    new_doc_name = col_c1.text_input("Nome do Novo Documento", placeholder="Ex: PQC 2026 - Novo Doc", key="bp_new_doc_input")
+    
+    # Get Workspaces for selection
+    workspaces_raw = get_workspaces_and_docs(CURRENT_BASE_URL, selected_org_id)
+    ws_opts = {ws['name']: ws['id'] for ws in workspaces_raw}
+    sel_ws_name = col_c2.selectbox("Workspace Destino", sorted(ws_opts.keys()), key="blueprint_ws_sel")
+
+    if st.button("🆕 Criar Documento Vazio", type="secondary", key="btn_create_empty_doc"):
+        if not new_doc_name:
+            st.error("Informe o nome do documento.")
+        else:
+            ws_id = ws_opts[sel_ws_name]
+            with st.spinner(f"Criando documento '{new_doc_name}'..."):
+                ok_doc, res_doc = create_document(CURRENT_BASE_URL, ws_id, new_doc_name)
+                if ok_doc:
+                    st.success(f"✅ Documento criado com sucesso! ID: {res_doc}")
+                    st.session_state.last_created_doc_id = res_doc
+                    st.session_state.last_created_doc_name = new_doc_name
+                    # Não usamos st.rerun() aqui para evitar voltar para a aba 1
+                    # Apenas limpamos o cache de documentos para a próxima recarga natural
+                    st.cache_data.clear()
+                else:
+                    st.error(f"❌ Falha ao criar documento: {res_doc}")
+
+    st.divider()
+
+    # 2. BLUEPRINT APPLICATION SECTION
+    st.subheader("2. Aplicar Estrutura (Blueprint JSON)")
+    
+    # Selection of Target Document
+    doc_opts_bp = {}
+    if st.session_state.mapped_data is not None:
+        all_docs_list = st.session_state.mapped_data[['Documento', 'Doc ID']].drop_duplicates()
+        doc_opts_bp = {r['Documento']: r['Doc ID'] for _, r in all_docs_list.iterrows()}
+    else:
+        for ws in workspaces_raw:
+            for d in ws.get('docs', []):
+                doc_opts_bp[d['name']] = d['id']
+    
+    # Injetar o documento recém criado se existir
+    if 'last_created_doc_id' in st.session_state:
+        doc_name_label = f"✨ Recém Criado ({st.session_state.get('last_created_doc_name', 'Novo')})"
+        doc_opts_bp[doc_name_label] = st.session_state.last_created_doc_id
+
+    sel_target_doc_name = st.selectbox("Selecione o Documento Alvo", sorted(doc_opts_bp.keys(), reverse=True), key="blueprint_target_doc")
+    
+    blueprint_json_raw = st.text_area("Cole o JSON de estrutura:", 
+                                    height=300, 
+                                    key="bp_json_area",
+                                    placeholder='''{
+  "tables": [
+    {
+      "id": "Tabela1",
+      "columns": [
+        {"id": "Nome", "type": "Text", "label": "Nome"}
+      ]
+    }
+  ]
+}''')
+
+    if st.button("🚀 Executar Blueprint", type="primary", key="btn_exec_blueprint"):
+        if not blueprint_json_raw.strip():
+            st.error("O campo JSON está vazio.")
+        elif not sel_target_doc_name:
+            st.error("Selecione um documento alvo.")
+        else:
+            try:
+                raw_data = json.loads(blueprint_json_raw)
+                
+                # Suporte para {"tables": [...]} ou [...]
+                if isinstance(raw_data, dict) and "tables" in raw_data:
+                    blueprint_data = raw_data["tables"]
+                elif isinstance(raw_data, list):
+                    blueprint_data = raw_data
+                else:
+                    st.error("Formato JSON inválido. Deve ser uma lista de tabelas ou um objeto com a chave 'tables'.")
+                    st.stop()
+
+                target_doc_id = doc_opts_bp[sel_target_doc_name]
+                progress_bp = st.progress(0.0)
+                logs_bp = []
+                
+                with st.status("Executando Blueprint em 2 etapas...", expanded=True) as status_container:
+                    
+                    # --- ETAPA 1: CRIAR TABELAS (ESQUELETO SEM REFS) ---
+                    status_container.write("### 🏗️ Etapa 1: Criando Tabelas (Sem Referências)")
+                    for i, tbl in enumerate(blueprint_data):
+                        t_id = tbl.get('id')
+                        t_cols_all = tbl.get('columns', [])
+                        
+                        # Filtrar apenas colunas que NÃO são Ref
+                        t_cols_skeleton = [
+                            c for c in t_cols_all 
+                            if not str(c.get('type', '')).startswith('Ref:')
+                        ]
+                        
+                        status_container.write(f"⏳ Criando esqueleto da tabela: **{t_id}**...")
+                        
+                        # Adaptar payload se o JSON do usuário não tiver a chave 'fields' (Grist standard vs simplify)
+                        # No JSON do usuário, 'type' e 'label' estão no nível da coluna. O create_table espera formatado.
+                        formatted_skeleton = []
+                        for col in t_cols_skeleton:
+                            formatted_skeleton.append({
+                                "id": col['id'],
+                                "fields": {
+                                    "label": col.get('label', col['id']),
+                                    "type": col.get('type', 'Text'),
+                                    "isFormula": col.get('isFormula', False),
+                                    "formula": col.get('formula', '')
+                                }
+                            })
+
+                        ok_bp, msg_bp = create_table(CURRENT_BASE_URL, target_doc_id, t_id, formatted_skeleton)
+                        
+                        if ok_bp:
+                            logs_bp.append(f"✅ {t_id}: Esqueleto criado.")
+                        elif msg_bp == "EXISTING":
+                            logs_bp.append(f"ℹ️ {t_id}: Já existe.")
+                        else:
+                            logs_bp.append(f"❌ {t_id}: Erro - {msg_bp}")
+                    
+                    progress_bp.progress(0.5)
+                    
+                    # --- ETAPA 2: ADICIONAR COLUNAS DE REFERÊNCIA ---
+                    status_container.write("### 🔗 Etapa 2: Vinculando Colunas de Referência")
+                    for i, tbl in enumerate(blueprint_data):
+                        t_id = tbl.get('id')
+                        t_cols_all = tbl.get('columns', [])
+                        
+                        t_cols_refs = [
+                            c for c in t_cols_all 
+                            if str(c.get('type', '')).startswith('Ref:')
+                        ]
+                        
+                        if t_cols_refs:
+                            formatted_refs = []
+                            for col in t_cols_refs:
+                                formatted_refs.append({
+                                    "id": col['id'],
+                                    "fields": {
+                                        "label": col.get('label', col['id']),
+                                        "type": col.get('type'),
+                                        "isFormula": col.get('isFormula', False),
+                                        "formula": col.get('formula', '')
+                                    }
+                                })
+                            
+                            status_container.write(f"⏳ Vinculando refs em: **{t_id}**...")
+                            ok_c, msg_c = add_columns(CURRENT_BASE_URL, target_doc_id, t_id, formatted_refs)
+                            if ok_c:
+                                logs_bp.append(f"🔗 {t_id}: Referências OK.")
+                            else:
+                                logs_bp.append(f"❌ {t_id}: Falha nas Refs - {msg_c}")
+                    
+                    progress_bp.progress(1.0)
+                    status_container.update(label="Processo Concluído!", state="complete")
+                
+                st.success("Blueprint aplicado!")
+                with st.expander("📄 Ver Log Detalhado"):
+                    st.code("\n".join(logs_bp))
+                    
+            except Exception as e:
+                st.error(f"💥 Erro na execução: {e}")
+                with st.expander("🛠️ Debug Técnico (Traceback)"):
+                    import traceback
+                    st.code(traceback.format_exc())
+
+    # --- DEBUG AREA AT THE BOTTOM ---
+    st.divider()
+    with st.expander("🔍 Debug do Estado da Aba"):
+        st.write("Documento Recém Criado ID:", st.session_state.get('last_created_doc_id', 'Nenhum'))
+        if blueprint_json_raw:
+            try:
+                st.write("Status do JSON:", "✅ Válido" if json.loads(blueprint_json_raw) else "⚠️ Vazio")
+            except:
+                st.write("Status do JSON: ❌ Erro de Sintaxe")
 
 
 
