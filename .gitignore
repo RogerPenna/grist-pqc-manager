@@ -10,4 +10,4 @@ streamlit_error.log
 streamlit_error2.log
 DIST_GristAdminToolkit/
 *.zip
-
+scratch/

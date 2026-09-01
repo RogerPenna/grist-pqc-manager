@@ -1230,9 +1230,11 @@ if main_menu_key == 'access':
                     except Exception as e: st.error(i18n[st.session_state.lang]["err_generic"].format(e=e))
 
 elif main_menu_key == 'data':
-    tab7, tab_trans, tab_import, tab6, tab8, tab10 = st.tabs([
+    tab7, tab_trans, tab_doc_copier, tab_inspector, tab_import, tab6, tab8, tab10 = st.tabs([
         i18n[st.session_state.lang]['tab_cloner'],
         i18n[st.session_state.lang]['tab_transporter'],
+        i18n[st.session_state.lang].get('tab_doc_copier', '👯 Duplicador de Docs'),
+        i18n[st.session_state.lang].get('tab_inspector', '🔍 Inspetor de Dados'),
         i18n[st.session_state.lang].get('tab_import', '📥 Importador CSV/JSON'),
         i18n[st.session_state.lang]['tab_audit'],
         i18n[st.session_state.lang]['tab_blueprint'],
@@ -1565,105 +1567,390 @@ elif main_menu_key == 'data':
                         st.markdown(i18n[st.session_state.lang]["console_operations"])
                         st.code("\n".join(st.session_state.get("t_logs", [])), language="markdown")
 
-
-            # --- NEW: TABLE INSPECTOR (FOR DEBUGGING) ---
-            st.divider()
-            with st.expander(i18n[st.session_state.lang]["inspector_debug"], expanded=False):
-                st.markdown(i18n[st.session_state.lang]["inspector_desc"])
+    with tab_doc_copier:
+        st.header(i18n[st.session_state.lang].get('tab_doc_copier', '👯 Duplicador de Docs em Massa'))
+        st.markdown("Duplique um ou vários documentos inteiros entre Organizações e Workspaces via API. Excelente para copiar documentos de sites de equipe Read-Only para sua Conta Pessoal ou entre servidores.")
+        
+        # Determine effective base URL for SaaS cross-org calls
+        eff_base_url = "https://docs.getgrist.com/api" if "getgrist.com" in CURRENT_BASE_URL else CURRENT_BASE_URL
+        
+        # Fetch Orgs
+        orgs_all = get_orgs(eff_base_url, AUTH_API_KEY)
+        org_map = {}
+        personal_label_key = None
+        
+        for o in orgs_all:
+            oid = o['id']
+            name = o.get('name', '')
+            domain = o.get('domain', '')
+            
+            if str(oid) == '30' or domain == 'docs':
+                label = f"📚 {name} (Templates Públicos / Somente Leitura)"
+            elif str(oid) == '0' or 'personal' in name.lower() or (domain == '' and o.get('owner')):
+                label = f"👤 {name} (Sua Conta Pessoal)"
+                personal_label_key = label
+            else:
+                label = f"🏢 {name} ({domain if domain else oid})"
                 
-                # Check for mapped data inside the expander context or just use it
-                all_docs_i = st.session_state.mapped_data[['Documento', 'Doc ID']].drop_duplicates()
-                doc_opts_i = {r['Documento']: r['Doc ID'] for _, r in all_docs_i.iterrows()}
-                
-                col_i1, col_i2 = st.columns(2)
-                insp_doc_name = col_i1.selectbox(i18n[st.session_state.lang]['doc_to_inspect'], sorted(doc_opts_i.keys()), index=None, key="insp_doc")
-                
-                if insp_doc_name:
-                    insp_doc_id = doc_opts_i[insp_doc_name]
-                    insp_tables = get_tables(CURRENT_BASE_URL, AUTH_API_KEY, insp_doc_id)
-                    insp_table_id = col_i2.selectbox(i18n[st.session_state.lang]['lbl_table'], sorted([t['id'] for t in insp_tables]), index=None, key="insp_table")
-                    
-                    if insp_table_id:
-                        col_btn1, col_i_rest = st.columns([1, 3])
-                        if col_btn1.button(i18n[st.session_state.lang]['btn_inspect_all'], key="btn_load_raw"):
-                            with st.spinner("Lendo Schema e Sandbox..."):
-                                # 1. Fetch Metadata (Schema) including hidden columns
-                                try:
-                                    url_hidden = f"{CURRENT_BASE_URL}/docs/{insp_doc_id}/tables/{insp_table_id}/columns?hidden=true"
-                                    response_hidden = requests.get(url_hidden, headers=get_auth_headers(AUTH_API_KEY))
-                                    raw_cols = response_hidden.json().get('columns', [])
-                                except Exception as e:
-                                    st.error(i18n[st.session_state.lang]["err_read_hidden_schema"].format(e=e))
-                                    raw_cols = []
-                                st.session_state.insp_schema = raw_cols
-                                
-                                # 2. Fetch Records
-                                raw_recs, err_i = fetch_table_records(CURRENT_BASE_URL, AUTH_API_KEY, insp_doc_id, insp_table_id)
-                                if err_i:
-                                    st.error(i18n[st.session_state.lang]["err_records"].format(err_i=err_i))
-                                    st.session_state.insp_raw_df = None
-                                else:
-                                    data_for_df = []
-                                    for r in raw_recs:
-                                        row = {"_id": r['id']}
-                                        row.update(r['fields'])
-                                        data_for_df.append(row)
-                                    st.session_state.insp_raw_df = pd.DataFrame(data_for_df)
-
-                        # --- DISPLAY SECTION ---
-                        if getattr(st.session_state, 'insp_schema', None) is not None:
-                            st.subheader(i18n[st.session_state.lang]["col_metadata"])
-                            schema_view = []
-                            for c in st.session_state.insp_schema:
-                                f = c['fields']
-                                cid = c['id']
-                                is_hidden = cid.startswith('gristHelper')
-                                display_id = f"👻 {cid}" if is_hidden else cid
-                                schema_view.append({
-                                    "ID": display_id,
-                                    "Label": f.get('label'),
-                                    "Tipo": f.get('type'),
-                                    "Fórmula?": f.get('isFormula'),
-                                    "Fórmula": f.get('formula', ''),
-                                    "Opções (widgetOptions)": f.get('widgetOptions', '')
-                                })
-                            
-                            df_schema = pd.DataFrame(schema_view)
-                            
-                            def color_hidden(val):
-                                if isinstance(val, str) and val.startswith("👻"):
-                                    return 'color: gray; font-style: italic; background-color: #f0f2f6;'
-                                return ''
-                                
-                            styled_schema = df_schema.style.map(color_hidden, subset=['ID'])
-                            st.dataframe(styled_schema, use_container_width=True, hide_index=True)
-                            
-                            # Export Schema as JSON
-                            st.markdown(i18n[st.session_state.lang]["json_schema"])
-                            st.code(json.dumps(st.session_state.insp_schema, indent=2, ensure_ascii=False), language="json")
-
-                        if getattr(st.session_state, 'insp_raw_df', None) is not None:
-                            st.subheader(i18n[st.session_state.lang]["raw_records"])
-                            df_insp = st.session_state.insp_raw_df.copy()
-                            df_insp.insert(0, "Selecionar", False)
-                            
-                            edited_insp = st.data_editor(
-                                df_insp,
-                                use_container_width=True,
-                                hide_index=True,
-                                column_config={"Selecionar": st.column_config.CheckboxColumn("Sel", default=False)},
-                                key="editor_insp_raw"
-                            )
-                            
-                            sel_insp = edited_insp[edited_insp["Selecionar"]]
-                            if not sel_insp.empty:
-                                st.info(i18n[st.session_state.lang]["x_rows_selected"].format(count=len(sel_insp)))
-                                export_json = sel_insp.drop(columns=["Selecionar"]).to_dict(orient='records')
-                                json_str = json.dumps(export_json, indent=2, ensure_ascii=False)
-                                st.markdown(i18n[st.session_state.lang]["json_data"])
-                                st.code(json_str, language="json")
+            org_map[label] = oid
+            
+        if not org_map:
+            st.error("Nenhuma organização encontrada.")
         else:
-            st.info("Mapeamento necessário.")
+            c_src_org, c_tgt_org = st.columns(2)
+            
+            src_org_label = c_src_org.selectbox("🏢 Organização de Origem", list(org_map.keys()), index=0, key="copier_src_org")
+            src_org_id = org_map[src_org_label]
+            
+            # Default target to Personal Account if available, otherwise index 0
+            personal_idx = 0
+            if personal_label_key and personal_label_key in org_map:
+                personal_idx = list(org_map.keys()).index(personal_label_key)
+            else:
+                for idx_k, k_name in enumerate(org_map.keys()):
+                    if "Pessoal" in k_name or "Personal" in k_name or "👤" in k_name:
+                        personal_idx = idx_k
+                        break
+                        
+            tgt_org_label = c_tgt_org.selectbox("🎯 Organização de Destino", list(org_map.keys()), index=personal_idx, key="copier_tgt_org")
+            tgt_org_id = org_map[tgt_org_label]
+            
+            st.divider()
+            col_src_ws, col_tgt_ws = st.columns(2)
+            
+            # Source Workspaces & Docs
+            src_wss = get_workspaces_and_docs(eff_base_url, AUTH_API_KEY, src_org_id)
+            src_ws_opts = {"[Todos os Workspaces da Origem]": "ALL"}
+            for ws in src_wss:
+                src_ws_opts[f"📁 {ws['name']} ({len(ws.get('docs', []))} docs)"] = ws['id']
+                
+            selected_src_ws_lbl = col_src_ws.selectbox("📂 Workspace de Origem", list(src_ws_opts.keys()), index=0, key="copier_src_ws")
+            selected_src_ws_id = src_ws_opts[selected_src_ws_lbl]
+            
+            # Filter source docs
+            docs_to_display = []
+            for ws in src_wss:
+                if selected_src_ws_id == "ALL" or ws['id'] == selected_src_ws_id:
+                    for d in ws.get('docs', []):
+                        docs_to_display.append({
+                            "Selecionar": True,
+                            "Documento": d['name'],
+                            "Workspace": ws['name'],
+                            "Doc ID": d['id']
+                        })
+                        
+            # Target Workspace
+            tgt_wss = get_workspaces_and_docs(eff_base_url, AUTH_API_KEY, tgt_org_id)
+            tgt_ws_opts = {}
+            for ws in tgt_wss:
+                tgt_ws_opts[f"📁 {ws['name']}"] = ws['id']
+            tgt_ws_opts["➕ [Criar Novo Workspace no Destino]"] = "NEW"
+            
+            selected_tgt_ws_lbl = col_tgt_ws.selectbox("🎯 Workspace de Destino", list(tgt_ws_opts.keys()), index=0, key="copier_tgt_ws")
+            selected_tgt_ws_id = tgt_ws_opts[selected_tgt_ws_lbl]
+            
+            new_ws_name = ""
+            if selected_tgt_ws_id == "NEW":
+                new_ws_name = col_tgt_ws.text_input("Nome do Novo Workspace", value="Docs Copiados", key="copier_new_ws_name")
+                
+            suffix_name = st.text_input("Sufixo no nome das cópias (opcional)", value="", placeholder="Ex: (Backup) ou deixe em branco para manter o mesmo nome", key="copier_suffix")
+            
+            if docs_to_display:
+                st.subheader(f"📄 Documentos Disponíveis ({len(docs_to_display)})")
+                df_docs = pd.DataFrame(docs_to_display)
+                
+                c_sel1, c_sel2, c_sel3 = st.columns([1.5, 1.5, 4])
+                if c_sel1.button("✅ Selecionar Todos", key="btn_sel_all_copier"):
+                    st.session_state.copier_sel_state = True
+                if c_sel2.button("❌ Desmarcar Todos", key="btn_desel_all_copier"):
+                    st.session_state.copier_sel_state = False
+                    
+                if "copier_sel_state" in st.session_state:
+                    df_docs['Selecionar'] = st.session_state.copier_sel_state
+                    
+                edited_df_docs = st.data_editor(
+                    df_docs,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Selecionar": st.column_config.CheckboxColumn("Sel", default=True),
+                        "Documento": st.column_config.TextColumn("Nome do Documento", disabled=True),
+                        "Workspace": st.column_config.TextColumn("Workspace Origem", disabled=True),
+                        "Doc ID": st.column_config.TextColumn("Doc ID", disabled=True)
+                    },
+                    key="copier_docs_editor"
+                )
+                
+                selected_docs = edited_df_docs[edited_df_docs['Selecionar']]
+                
+                st.write("")
+                if st.button(f"🚀 Duplicar {len(selected_docs)} Documento(s) Selecionado(s)", type="primary", disabled=len(selected_docs) == 0, key="btn_execute_mass_copy"):
+                    final_tgt_ws_id = selected_tgt_ws_id
+                    
+                    if selected_tgt_ws_id == "NEW":
+                        if not new_ws_name.strip():
+                            st.error("Informe o nome do novo workspace.")
+                            st.stop()
+                        with st.spinner(f"Criando novo workspace '{new_ws_name}' na organização de destino..."):
+                            try:
+                                create_ws_url = f"{eff_base_url}/orgs/{tgt_org_id}/workspaces"
+                                r_create_ws = requests.post(create_ws_url, headers=get_auth_headers(AUTH_API_KEY), json={"name": new_ws_name.strip()})
+                                if r_create_ws.status_code == 200:
+                                    final_tgt_ws_id = r_create_ws.json()
+                                    st.success(f"Workspace '{new_ws_name}' criado com sucesso (ID: {final_tgt_ws_id})!")
+                                else:
+                                    st.error(f"Erro ao criar workspace ({create_ws_url}): {r_create_ws.status_code} - {r_create_ws.text}")
+                                    st.stop()
+                            except Exception as ex_ws:
+                                st.error(f"Exceção ao criar workspace: {ex_ws}")
+                                st.stop()
+                                
+                    progress_bar = st.progress(0.0)
+                    status_text = st.empty()
+                    logs_copier = []
+                    
+                    total_docs = len(selected_docs)
+                    success_count = 0
+                    
+                    for idx_d, row_d in selected_docs.reset_index().iterrows():
+                        doc_id = row_d['Doc ID']
+                        doc_name = row_d['Documento']
+                        
+                        target_doc_name = f"{doc_name} {suffix_name}".strip() if suffix_name else doc_name
+                        
+                        status_text.markdown(f"⏳ Copiando [{idx_d+1}/{total_docs}]: **{doc_name}**...")
+                        
+                        copy_payload = {
+                            "workspaceId": final_tgt_ws_id,
+                            "documentName": target_doc_name,
+                            "sourceDocumentId": doc_id,
+                            "asTemplate": False
+                        }
+                        
+                        try:
+                            copy_doc_url = f"{eff_base_url}/docs"
+                            r_copy = requests.post(copy_doc_url, headers=get_auth_headers(AUTH_API_KEY), json=copy_payload)
+                            if r_copy.status_code == 200:
+                                new_id = r_copy.json()
+                                success_count += 1
+                                logs_copier.append(f"✅ **{doc_name}** -> Copiado como '{target_doc_name}' (Novo ID: `{new_id}`)")
+                            else:
+                                err_text = r_copy.text
+                                # Fallback: If direct API copy is blocked by ACL rules ("Insufficient access to document to copy it entirely") or 403, download raw .grist file & import!
+                                if "Insufficient access to document to copy it entirely" in err_text or r_copy.status_code == 403:
+                                    status_text.markdown(f"⏳ Recorrendo ao Download/Import do banco bruto [{idx_d+1}/{total_docs}]: **{doc_name}**...")
+                                    dl_url = f"{eff_base_url}/docs/{doc_id}/download?nohistory=true"
+                                    r_dl = requests.get(dl_url, headers=get_auth_headers(AUTH_API_KEY))
+                                    
+                                    if r_dl.status_code == 200:
+                                        grist_bytes = r_dl.content
+                                        import_url = f"{eff_base_url}/workspaces/{final_tgt_ws_id}/import"
+                                        files_payload = {
+                                            'upload': (f"{target_doc_name}.grist", grist_bytes, 'application/x-sqlite3')
+                                        }
+                                        r_imp = requests.post(import_url, headers=get_auth_headers(AUTH_API_KEY), files=files_payload)
+                                        if r_imp.status_code == 200:
+                                            new_id = r_imp.json()
+                                            success_count += 1
+                                            logs_copier.append(f"✅ **{doc_name}** -> Copiado via Download/Import Bruto como '{target_doc_name}' (Novo ID: `{new_id}`)")
+                                        else:
+                                            logs_copier.append(f"❌ **{doc_name}** -> Erro no Import: {r_imp.status_code} - {r_imp.text}")
+                                    else:
+                                        logs_copier.append(f"❌ **{doc_name}** -> Erro Copy ({r_copy.status_code}) e Erro Download ({r_dl.status_code}): {r_dl.text}")
+                                else:
+                                    logs_copier.append(f"❌ **{doc_name}** -> Erro {r_copy.status_code}: {err_text}")
+                        except Exception as e_cp:
+                            logs_copier.append(f"❌ **{doc_name}** -> Exceção: {e_cp}")
+                            
+                        progress_bar.progress((idx_d + 1) / total_docs)
+                        
+                    status_text.markdown(f"🎉 **Processo Concluído!** {success_count}/{total_docs} documentos duplicados com sucesso.")
+                    st.success(f"{success_count} documentos copiados para o workspace de destino!")
+                    
+                    with st.expander("📋 Detalhes e Logs da Duplicação", expanded=True):
+                        for log_entry in logs_copier:
+                            st.markdown(log_entry)
+                            
+                    st.cache_data.clear()
+            else:
+                st.info("Nenhum documento encontrado na origem selecionada.")
+
+    with tab_inspector:
+        st.header(i18n[st.session_state.lang].get('tab_inspector', '🔍 Inspetor de Dados'))
+        st.markdown(i18n[st.session_state.lang]["inspector_desc"])
+        
+        if st.session_state.mapped_data is not None:
+            all_docs_i = st.session_state.mapped_data[['Documento', 'Doc ID']].drop_duplicates()
+            doc_opts_i = {r['Documento']: r['Doc ID'] for _, r in all_docs_i.iterrows()}
+        else:
+            wss = get_workspaces_and_docs(CURRENT_BASE_URL, AUTH_API_KEY, selected_org_id)
+            doc_opts_i = {d['name']: d['id'] for ws in wss for d in ws.get('docs', [])}
+            
+        col_i1, col_i2 = st.columns(2)
+        insp_doc_name = col_i1.selectbox(i18n[st.session_state.lang]['doc_to_inspect'], sorted(doc_opts_i.keys()), index=None, key="insp_doc")
+        
+        if insp_doc_name:
+            insp_doc_id = doc_opts_i[insp_doc_name]
+            
+            # Download raw .grist file option
+            st.info("💡 **Dica para Documentos Read-Only:** Se as Regras de Acesso (ACL) estiverem escondendo linhas ou bloqueando downloads no site de equipe, baixe o arquivo bruto ou duplique o documento para sua conta Pessoal!")
+            c_dl1, c_dl2 = st.columns([2, 3])
+            if c_dl1.button("💾 Obter Arquivo Bruto (.grist)", key="btn_download_grist_file"):
+                with st.spinner("Baixando banco de dados SQLite .grist completo..."):
+                    url_dl = f"{CURRENT_BASE_URL}/docs/{insp_doc_id}/download?nohistory=true"
+                    r_dl = requests.get(url_dl, headers=get_auth_headers(AUTH_API_KEY))
+                    if r_dl.status_code == 200:
+                        st.session_state.grist_file_bytes = r_dl.content
+                        st.session_state.grist_file_doc_id = insp_doc_id
+                        st.success("✅ Arquivo bruto recuperado com sucesso!")
+                    elif r_dl.status_code == 403:
+                        st.error(f"Erro 403: {r_dl.text}")
+                        st.warning("🔒 **O download direto foi bloqueado pelo Grist SaaS.** No entanto, podemos copiar este documento para sua **Conta Pessoal (Personal)** via API. Na sua conta pessoal você se tornará **OWNER**, liberando o download do arquivo `.grist` e a leitura de todos os registros!")
+                        st.session_state.show_copy_to_personal = True
+                    else:
+                        st.error(f"Erro ao baixar arquivo: {r_dl.status_code} - {r_dl.text}")
+
+            if getattr(st.session_state, 'show_copy_to_personal', False):
+                if st.button("🚀 Copiar Documento para Conta Pessoal Agora", key="btn_copy_to_personal"):
+                    with st.spinner("Buscando sua conta pessoal e copiando o documento..."):
+                        try:
+                            eff_base_url = "https://docs.getgrist.com/api" if "getgrist.com" in CURRENT_BASE_URL else CURRENT_BASE_URL
+                            orgs_resp = requests.get(f"{eff_base_url}/orgs", headers=get_auth_headers(AUTH_API_KEY))
+                            if orgs_resp.status_code == 200:
+                                orgs_list = orgs_resp.json()
+                                personal_org = next((o for o in orgs_list if str(o.get('id')) == '0' or ('personal' in str(o.get('name', '')).lower() and str(o.get('id')) != '30')), None)
+                                if not personal_org:
+                                    personal_org = next((o for o in orgs_list if str(o.get('id')) != '30' and o.get('domain') != 'docs'), None)
+                                
+                                if personal_org:
+                                    ws_resp = requests.get(f"{eff_base_url}/orgs/{personal_org['id']}/workspaces", headers=get_auth_headers(AUTH_API_KEY))
+                                    if ws_resp.status_code == 200:
+                                        ws_list = ws_resp.json()
+                                        if ws_list:
+                                            target_ws_id = ws_list[0]['id']
+                                            target_ws_name = ws_list[0]['name']
+                                            
+                                            copy_payload = {
+                                                "workspaceId": target_ws_id,
+                                                "documentName": f"{insp_doc_name} (Backup)",
+                                                "sourceDocumentId": insp_doc_id,
+                                                "asTemplate": False
+                                            }
+                                            copy_resp = requests.post(f"{eff_base_url}/docs", headers=get_auth_headers(AUTH_API_KEY), json=copy_payload)
+                                            if copy_resp.status_code == 200:
+                                                new_doc_id = copy_resp.json()
+                                                st.success(f"🎉 **DOCUMENTO DUPLICADO COM SUCESSO!**\n\nNovo ID no Workspace '{target_ws_name}': `{new_doc_id}`.\n\nComo você é OWNER nesta nova cópia, selecione o documento '{insp_doc_name} (Backup)' na lista acima para visualizar todos os dados e baixar o arquivo `.grist` sem nenhum bloqueio!")
+                                                st.cache_data.clear()
+                                                st.session_state.show_copy_to_personal = False
+                                            else:
+                                                st.error(f"Erro ao copiar documento: {copy_resp.status_code} - {copy_resp.text}")
+                                        else:
+                                            st.error("Nenhum workspace encontrado na conta Pessoal.")
+                                    else:
+                                        st.error(f"Erro ao buscar workspaces: {ws_resp.status_code}")
+                                else:
+                                    st.error("Conta pessoal não encontrada nas organizações.")
+                            else:
+                                st.error(f"Erro ao buscar organizações: {orgs_resp.status_code}")
+                        except Exception as ex_copy:
+                            st.error(f"Exceção ao copiar: {ex_copy}")
+
+            if getattr(st.session_state, 'grist_file_bytes', None) is not None and getattr(st.session_state, 'grist_file_doc_id', None) == insp_doc_id:
+                st.download_button(
+                    label=f"⬇️ Salvar '{insp_doc_name}.grist' no seu computador",
+                    data=st.session_state.grist_file_bytes,
+                    file_name=f"{insp_doc_name}.grist",
+                    mime="application/x-sqlite3",
+                    key="btn_save_grist_file"
+                )
+
+            st.divider()
+            insp_tables = get_tables(CURRENT_BASE_URL, AUTH_API_KEY, insp_doc_id)
+            insp_table_id = col_i2.selectbox(i18n[st.session_state.lang]['lbl_table'], sorted([t['id'] for t in insp_tables]), index=None, key="insp_table")
+            
+            if insp_table_id:
+                col_btn1, col_i_rest = st.columns([1, 3])
+                if col_btn1.button(i18n[st.session_state.lang]['btn_inspect_all'], key="btn_load_raw"):
+                    with st.spinner("Lendo Schema e Sandbox..."):
+                        # 1. Fetch Metadata (Schema) including hidden columns
+                        try:
+                            url_hidden = f"{CURRENT_BASE_URL}/docs/{insp_doc_id}/tables/{insp_table_id}/columns?hidden=true"
+                            response_hidden = requests.get(url_hidden, headers=get_auth_headers(AUTH_API_KEY))
+                            raw_cols = response_hidden.json().get('columns', [])
+                        except Exception as e:
+                            st.error(i18n[st.session_state.lang]["err_read_hidden_schema"].format(e=e))
+                            raw_cols = []
+                        st.session_state.insp_schema = raw_cols
+                        
+                        # 2. Fetch Records
+                        raw_recs, err_i = fetch_table_records(CURRENT_BASE_URL, AUTH_API_KEY, insp_doc_id, insp_table_id)
+                        if err_i:
+                            st.error(i18n[st.session_state.lang]["err_records"].format(err_i=err_i))
+                            st.session_state.insp_raw_df = None
+                        else:
+                            if not raw_recs:
+                                st.warning("⚠️ **Registros vazios na API:** As Regras de Acesso (ACL) do Grist reduziram sua função para 'Viewer', escondendo as linhas nesta consulta API JSON. Para recuperar todos os registros intactos, utilize o botão **'Obter Arquivo Bruto (.grist)'** acima!")
+                                st.session_state.insp_raw_df = pd.DataFrame()
+                            else:
+                                data_for_df = []
+                                for r in raw_recs:
+                                    row = {"_id": r['id']}
+                                    row.update(r['fields'])
+                                    data_for_df.append(row)
+                                st.session_state.insp_raw_df = pd.DataFrame(data_for_df)
+
+                # --- DISPLAY SECTION ---
+                if getattr(st.session_state, 'insp_schema', None) is not None:
+                    st.subheader(i18n[st.session_state.lang]["col_metadata"])
+                    schema_view = []
+                    for c in st.session_state.insp_schema:
+                        f = c['fields']
+                        cid = c['id']
+                        is_hidden = cid.startswith('gristHelper')
+                        display_id = f"👻 {cid}" if is_hidden else cid
+                        schema_view.append({
+                            "ID": display_id,
+                            "Label": f.get('label'),
+                            "Tipo": f.get('type'),
+                            "Fórmula?": f.get('isFormula'),
+                            "Fórmula": f.get('formula', ''),
+                            "Opções (widgetOptions)": f.get('widgetOptions', '')
+                        })
+                    
+                    df_schema = pd.DataFrame(schema_view)
+                    
+                    def color_hidden(val):
+                        if isinstance(val, str) and val.startswith("👻"):
+                            return 'color: gray; font-style: italic; background-color: #f0f2f6;'
+                        return ''
+                        
+                    styled_schema = df_schema.style.map(color_hidden, subset=['ID'])
+                    st.dataframe(styled_schema, use_container_width=True, hide_index=True)
+                    
+                    # Export Schema as JSON
+                    st.markdown(i18n[st.session_state.lang]["json_schema"])
+                    st.code(json.dumps(st.session_state.insp_schema, indent=2, ensure_ascii=False), language="json")
+
+                if getattr(st.session_state, 'insp_raw_df', None) is not None:
+                    st.subheader(i18n[st.session_state.lang]["raw_records"])
+                    df_insp = st.session_state.insp_raw_df.copy()
+                    df_insp.insert(0, "Selecionar", False)
+                    
+                    edited_insp = st.data_editor(
+                        df_insp,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={"Selecionar": st.column_config.CheckboxColumn("Sel", default=False)},
+                        key="editor_insp_raw"
+                    )
+                    
+                    sel_insp = edited_insp[edited_insp["Selecionar"]]
+                    if not sel_insp.empty:
+                        st.info(i18n[st.session_state.lang]["x_rows_selected"].format(count=len(sel_insp)))
+                        export_json = sel_insp.drop(columns=["Selecionar"]).to_dict(orient='records')
+                        json_str = json.dumps(export_json, indent=2, ensure_ascii=False)
+                        st.markdown(i18n[st.session_state.lang]["json_data"])
+                        st.code(json_str, language="json")
 
     with tab_import:
         st.header(i18n[st.session_state.lang].get('tab_import', '📥 Importador CSV/JSON'))
